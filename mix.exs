@@ -1,7 +1,7 @@
 defmodule Money.Mixfile do
   use Mix.Project
 
-  @version "4.3.0"
+  @version "5.5.2"
 
   def project do
     [
@@ -53,7 +53,7 @@ defmodule Money.Mixfile do
 
   def application do
     [
-      mod: {Money.Application, []},
+      mod: {Money.Application, [strategy: :one_for_one, name: Money.Supervisor]},
       extra_applications: [:inets, :logger]
     ]
   end
@@ -65,7 +65,7 @@ defmodule Money.Mixfile do
       main: "readme",
       groups_for_modules: groups_for_modules(),
       logo: "logo.png",
-      skip_undefined_reference_warnings_on: ["changelog"]
+      skip_undefined_reference_warnings_on: ["changelog", "CHANGELOG.md", "README.md"]
     ]
   end
 
@@ -82,31 +82,20 @@ defmodule Money.Mixfile do
 
   defp deps do
     [
-      {:ex_cldr, "~> 2.6"},
-      {:ex_cldr_numbers, "~> 2.6"},
-      {:decimal, "~> 1.5"},
+      {:ex_cldr_numbers, "~> 2.16"},
+      {:decimal, "~> 1.6 or ~> 2.0"},
       {:phoenix_html, "~> 2.0", optional: true},
-      {:dialyxir, "~> 1.0.0-rc.4", only: [:dev], runtime: false},
+      {:nimble_parsec, "~> 0.5 or ~> 1.0"},
+      {:dialyxir, "~> 1.0", only: [:dev], runtime: false},
       {:jason, "~> 1.0", optional: true},
-      {:stream_data, "~> 0.4.1", only: [:dev, :test]},
+      {:stream_data, "~> 0.4", only: [:dev, :test]},
       {:gringotts, "~>1.1", only: :test, optional: true},
       {:benchee, "~> 1.0", optional: true, only: :dev},
       {:exprof, "~> 0.2", only: :dev, runtime: false},
-      ex_doc_version(System.version())
+      {:ex_doc, "~> 0.22", only: [:dev, :release]},
+      {:castore, "~> 0.1", optional: true},
+      {:certifi, "~> 2.5", optional: true}
     ]
-  end
-
-  defp ex_doc_version(version) do
-    cond do
-      Version.compare(version, "1.7.0") in [:gt, :eq] ->
-        {:ex_doc, "~> 0.19", only: [:dev, :release]}
-
-      Version.compare(version, "1.6.0") == :lt ->
-        {:ex_doc, ">= 0.17.0 and < 0.18.0", only: [:dev, :release]}
-
-      Version.compare(version, "1.7.0") == :lt ->
-        {:ex_doc, ">= 0.18.0 and < 0.19.0", only: [:dev, :release]}
-    end
   end
 
   defp elixirc_paths(:test), do: ["lib", "test", "test/support"]

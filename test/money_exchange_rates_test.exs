@@ -15,11 +15,12 @@ defmodule Money.ExchangeRates.Test do
   end
 
   test "Convert from USD to AUD" do
-    assert Money.cmp(Money.to_currency!(Money.new(:USD, 100), :AUD), Money.new(:AUD, 70)) == :eq
+    assert Money.compare(Money.to_currency!(Money.new(:USD, 100), :AUD), Money.new(:AUD, 70)) == :eq
   end
 
   test "Convert from USD to USD" do
-    assert Money.cmp(Money.to_currency!(Money.new(:USD, 100), :USD), Money.new(:USD, 100)) == :eq
+    assert Money.compare(Money.to_currency!(Money.new(:USD, 100), :USD), Money.new(:USD, 100)) ==
+             :eq
   end
 
   test "Convert from USD to ZZZ should return an error" do
@@ -76,9 +77,13 @@ defmodule Money.ExchangeRates.Test do
       config = Money.ExchangeRates.OpenExchangeRates.init(Money.ExchangeRates.default_config())
       config = Map.put(config, :log_levels, %{failure: nil, info: nil, success: nil})
 
+      # Testing only, should not be used in production
+      # config = Map.put(config, :verify_peer, false)
+
       case Money.ExchangeRates.OpenExchangeRates.get_latest_rates(config) do
         {:ok, rates} -> assert is_map(rates)
         {:error, :nxdomain} -> :no_network
+        {:error, other} -> IO.warn(inspect(other))
       end
     end
   end

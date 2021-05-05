@@ -35,24 +35,26 @@ defmodule Money do
   """
 
   import Kernel, except: [round: 1, abs: 1]
+  require Cldr.Macros
+  alias Cldr.Config
 
   @typedoc """
   Money is composed of an atom representation of an ISO4217 currency code and
   a `Decimal` representation of an amount.
   """
-  @type t :: %Money{currency: atom(), amount: Decimal.t()}
+  @type t :: %Money{currency: atom(), amount: Decimal.t(), format_options: Keyword.t()}
   @type currency_code :: atom() | String.t()
   @type amount :: float() | integer() | Decimal.t() | String.t()
 
   @enforce_keys [:currency, :amount]
-  defstruct currency: nil, amount: nil
+  defstruct currency: nil, amount: nil, format_options: []
 
   @doc false
   def cldr_backend_provider(config) do
     Money.Backend.define_money_module(config)
   end
 
-  @json_library Application.get_env(:ex_money, :json_library, Cldr.Config.json_library())
+  @json_library Application.get_env(:ex_money, :json_library, Config.json_library())
   unless Code.ensure_loaded?(@json_library) do
     IO.puts("""
 
@@ -104,12 +106,21 @@ defmodule Money do
 
   * `amount` is an integer, string or Decimal
 
+  * `options` is a keyword list of options
+
   ## Options
 
-  `:locale` is any known locale.  The locale is used to normalize any
-  binary (String) amounts to a form that can be consumed by `Decimal.new/1`.
-  This consists of removing any localised grouping characters and replacing
-  the localised decimal separator with a ".".
+  * `:locale` is any known locale.  The locale is used to normalize any
+    binary (String) amounts to a form that can be consumed by `Decimal.new/1`.
+    This consists of removing any localised grouping characters and replacing
+    the localised decimal separator with a ".".
+    The default is `Cldr.get_locale/0`.
+
+  * `:backend` is any module() that includes `use Cldr` and therefore
+    is a `Cldr` backend module(). The default is `Money.default_backend/0`.
+
+  * Any other options are considered as formatting options to
+    be applied by default when calling `Money.to_string/2`.
 
   Note that the `currency_code` and `amount` arguments can be supplied in
   either order,
@@ -132,6 +143,9 @@ defmodule Money do
       #Money<:EUR, 100>
 
       iex> Money.new(:EUR, "100.30")
+      #Money<:EUR, 100.30>
+
+      iex> Money.new(:EUR, "100.30", fractional_digits: 4)
       #Money<:EUR, 100.30>
 
       iex> Money.new(:XYZZ, 100)
@@ -164,9 +178,10 @@ defmodule Money do
     new(currency_code, amount, options)
   end
 
-  def new(currency_code, amount, _options) when is_atom(currency_code) and is_integer(amount) do
+  def new(currency_code, amount, options) when is_atom(currency_code) and is_integer(amount) do
     with {:ok, code} <- validate_currency(currency_code) do
-      %Money{amount: Decimal.new(amount), currency: code}
+      format_options = extract_format_options(options)
+      %Money{amount: Decimal.new(amount), currency: code, format_options: format_options}
     else
       {:error, {Cldr.UnknownCurrencyError, message}} ->
         {:error, {Money.UnknownCurrencyError, message}}
@@ -177,11 +192,15 @@ defmodule Money do
     new(currency_code, amount, options)
   end
 
-  def new(currency_code, %Decimal{} = amount, _options)
+  def new(currency_code, %Decimal{} = amount, options)
       when is_atom(currency_code) or is_binary(currency_code) do
     case validate_currency(currency_code) do
-      {:error, {_exception, message}} -> {:error, {Money.UnknownCurrencyError, message}}
-      {:ok, code} -> %Money{amount: amount, currency: code}
+      {:error, {_exception, message}} ->
+        {:error, {Money.UnknownCurrencyError, message}}
+
+      {:ok, code} ->
+        format_options = extract_format_options(options)
+        %Money{amount: amount, currency: code, format_options: format_options}
     end
   end
 
@@ -234,6 +253,13 @@ defmodule Money do
               "Unable to create money from #{inspect(param_a)} " <> "and #{inspect(param_b)}"}}
         end
     end
+  end
+
+  defp extract_format_options(options) do
+    options
+    |> Keyword.delete(:locale)
+    |> Keyword.delete(:backend)
+    |> Keyword.delete(:default_currency)
   end
 
   @doc """
@@ -301,6 +327,9 @@ defmodule Money do
 
   * `amount` is a float
 
+  * `options` is a keyword list of options passed
+    to `Money.new/3`. The default is `[]`.
+
   ## Examples
 
       iex> Money.from_float 1.23456, :USD
@@ -314,15 +343,17 @@ defmodule Money do
           "Reduce the precision or call Money.new/2 with a Decimal or String amount"}}
 
   """
-  # @doc since: "2.0.0"
+  Cldr.Macros.doc_since("2.0.0")
   @max_precision_allowed 15
-  @spec from_float(float | currency_code, float | currency_code) ::
+  @spec from_float(float | currency_code, float | currency_code, Keyword.t()) ::
           Money.t() | {:error, {module(), String.t()}}
 
-  def from_float(currency_code, amount)
+  def from_float(currency_code, amount, options \\ [])
+
+  def from_float(currency_code, amount, options)
       when (is_binary(currency_code) or is_atom(currency_code)) and is_float(amount) do
     if Cldr.Number.precision(amount) <= @max_precision_allowed do
-      new(currency_code, Decimal.from_float(amount))
+      new(currency_code, Decimal.from_float(amount), options)
     else
       {:error,
        {Money.InvalidAmountError,
@@ -333,9 +364,9 @@ defmodule Money do
     end
   end
 
-  def from_float(amount, currency_code)
+  def from_float(amount, currency_code, options)
       when (is_binary(currency_code) or is_atom(currency_code)) and is_float(amount) do
-    from_float(currency_code, amount)
+    from_float(currency_code, amount, options)
   end
 
   @doc """
@@ -354,6 +385,9 @@ defmodule Money do
 
   * `amount` is a float
 
+  * `options` is a keyword list of options passed
+    to `Money.new/3`. The default is `[]`.
+
   ## Examples
 
       iex> Money.from_float!(:USD, 1.234)
@@ -364,29 +398,34 @@ defmodule Money do
           (ex_money) lib/money.ex:293: Money.from_float!/2
 
   """
-  # @doc since: "2.0.0"
-  @spec from_float!(currency_code, float) :: Money.t() | no_return()
+  Cldr.Macros.doc_since("2.0.0")
+  @spec from_float!(currency_code, float, Keyword.t()) :: Money.t() | no_return()
 
-  def from_float!(currency_code, amount) do
-    case from_float(currency_code, amount) do
+  def from_float!(currency_code, amount, options \\ []) do
+    case from_float(currency_code, amount, options) do
       {:error, {exception, reason}} -> raise exception, reason
       money -> money
     end
   end
 
-  # The set of grouping chars and decimal chars comes
-  # from CLDR's "misc" category for the "en" locale.
-  # Ideally we would be generating these characters
-  # from the locale files directly.
-  @grouping_chars ",،٫、︐︑﹐﹑，､"
-  @decimal_chars ".․。︒﹒．｡"
-  @currency "[^0-9#{@grouping_chars}#{@decimal_chars}]+"
-  @amount "[0-9][0-9#{@grouping_chars}#{@decimal_chars}]*"
-  @regex Regex.compile!("^(?<cb>#{@currency})?(?<amount>#{@amount})?(?<ca>#{@currency})?$", "u")
+  @doc """
+  Add format options to a `t:Money`.
 
-  @doc false
-  def parser_regex do
-    @regex
+  ## Arguments
+
+  * `money` is any valid `t:Money` type returned
+    by `Money.new/2`
+
+  * `options` is a keyword list of options. These
+    options are used when calling `Money.to_string/2`.
+    The default is `[]`
+
+  """
+
+  Cldr.Macros.doc_since("5.5.0")
+  @spec put_format_options(Money.t(), Keyword.t()) :: Money.t()
+  def put_format_options(%Money{} = money, options) when is_list(options) do
+    %{money | format_options: options}
   end
 
   @doc """
@@ -410,17 +449,57 @@ defmodule Money do
 
   ## Options
 
-  * `backend` is any module() that includes `use Cldr` and therefore
+  * `:backend` is any module() that includes `use Cldr` and therefore
     is a `Cldr` backend module(). The default is `Money.default_backend()`
 
-  * `locale_name` is any valid locale name returned by `Cldr.known_locale_names/1`
+  * `:locale` is any valid locale returned by `Cldr.known_locale_names/1`
     or a `Cldr.LanguageTag` struct returned by `Cldr.Locale.new!/2`
     The default is `<backend>.get_locale()`
 
-  * `currency_filter` is an `atom` or list of `atoms` representing the
-    currency types to be considered for a match. If a list of
-    atoms is given, the currency must meet all criteria for
-    it to be considered.
+  * `:only` is an `atom` or list of `atoms` representing the
+    currencies or currency types to be considered for a match.
+    The equates to a list of acceptable currencies for parsing.
+    See the notes below for currency types.
+
+  * `:except` is an `atom` or list of `atoms` representing the
+    currencies or currency types to be not considered for a match.
+    This equates to a list of unacceptable currencies for parsing.
+    See the notes below for currency types.
+
+  * `:fuzzy` is a float greater than `0.0` and less than or
+    equal to `1.0` which is used as input to the
+    `String.jaro_distance/2` to determine is the provided
+    currency string is *close enough* to a known currency
+    string for it to identify definitively a currency code.
+    It is recommended to use numbers greater than `0.8` in
+    order to reduce false positives.
+
+  * `:default_currency` is any valid currency code or `false`
+    that will used if no currency code, symbol or description is
+    indentified in the parsed string. The default is `nil`
+    which means that the default currency associated with
+    the `:locale` option will be used. If `false` then the
+    currency assocated with the `:locale` option will not be
+    used and an error will be returned if there is no currency
+    in the string being parsed.
+
+  ## Returns
+
+  * a `Money.t` if parsing is successful or
+
+  * `{:error, {exception, reason}}` if an error is
+    detected.
+
+  ## Notes
+
+  The `:only` and `:except` options accept a list of
+  currency codes and/or currency types.  The following
+  types are recognised.
+
+  If both `:only` and `:except` are specified,
+  the `:except` entries take priority - that means
+  any entries in `:except` are removed from the `:only`
+  entries.
 
     * `:all`, the default, considers all currencies
 
@@ -434,21 +513,6 @@ defmodule Money do
     * `:unannotated` considers currencies that don't have
       "(some string)" in their names.  These are usually
       financial instruments.
-
-  * `fuzzy` is a float greater than `0.0` and less than or
-    equal to `1.0` which is used as input to the
-    `String.jaro_distance/2` to determine is the provided
-    currency string is *close enough* to a known currency
-    string for it to identify definitively a currency code.
-    It is recommended to use numbers greater than `0.8` in
-    order to reduce false positives.
-
-  ## Returns
-
-  * a `Money.t` if parsing is successful or
-
-  * `{:error, {exception, reason}}` if an error is
-    detected.
 
   ## Examples
 
@@ -464,107 +528,111 @@ defmodule Money do
       iex> Money.parse("100 eurosports", fuzzy: 0.8)
       #Money<:EUR, 100>
 
+      iex> Money.parse("100", default_currency: :EUR)
+      #Money<:EUR, 100>
+
       iex> Money.parse("100 eurosports", fuzzy: 0.9)
-      {:error,
-       {Money.Invalid, "Unable to create money from \\"eurosports\\" and \\"100\\""}}
+      {:error, {Money.UnknownCurrencyError, "The currency \\"eurosports\\" is unknown or not supported"}}
 
       iex> Money.parse("100 afghan afghanis")
       #Money<:AFN, 100>
 
-      iex> Money.parse("100")
-      {:error,
-       {Money.Invalid,
-        "A currency code must be specified but was not found in \\"100\\""}}
+      iex> Money.parse("100", default_currency: false)
+      {:error, {Money.Invalid,
+        "A currency code, symbol or description must be specified but was not found in \\"100\\""}}
 
       iex> Money.parse("USD 100 with trailing text")
-      {:error,
-        {Money.Invalid, "A currency code can only be specified once. " <>
-          "Found both \\"usd\\" and \\"with trailing text\\"."}}
+      {:error, {Money.ParseError, "Could not parse \\"USD 100 with trailing text\\"."}}
 
   """
-  # @doc since: "3.2.0"
+  Cldr.Macros.doc_since("3.2.0")
   @spec parse(String.t(), Keyword.t()) :: Money.t() | {:error, {module(), String.t()}}
-  def parse(string, options \\ [])
 
-  def parse(string, options) do
-    @regex
-    |> Regex.named_captures(String.trim(string))
-    |> trim_and_lower("ca")
-    |> trim_and_lower("cb")
-    |> do_parse(string, options)
+  def parse(string, options \\ []) do
+    with {:ok, result, "", _, _, _} <- Money.Parser.money_parser(String.trim(string)) do
+      result
+      |> Enum.map(fn {k, v} -> {k, String.trim_trailing(v)} end)
+      |> Keyword.put_new(:currency, Keyword.get(options, :default_currency))
+      |> Map.new()
+      |> maybe_create_money(string, options)
+    else
+      _ ->
+        {:error, {Money.ParseError, "Could not parse #{inspect(string)}."}}
+    end
   end
 
-  defp trim_and_lower(nil, _key) do
-    nil
-  end
-
-  defp trim_and_lower(map, key) do
-    value =
-      map
-      |> Map.get(key)
-      |> String.trim()
-      |> String.downcase()
-
-    Map.put(map, key, value)
-  end
-
-  defp do_parse(%{"cb" => "", "ca" => ""}, string, _options) do
-    {:error,
-     {Money.Invalid, "A currency code must be specified but was not found in #{inspect(string)}"}}
-  end
-
-  defp do_parse(%{"amount" => ""}, string, _options) do
-    {:error, {Money.Invalid, "An amount must be specified but was not found in #{inspect(string)}"}}
-  end
-
-  defp do_parse(%{"cb" => "", "ca" => currency, "amount" => amount}, _, options) do
-    maybe_create_money(currency, amount, options)
-  end
-
-  defp do_parse(%{"cb" => currency, "ca" => "", "amount" => amount}, _, options) do
-    maybe_create_money(currency, amount, options)
-  end
-
-  defp do_parse(%{"cb" => cb, "ca" => ca}, _, _options) do
+  # No currency was in the string and options[:default_currency] == false
+  # meaning don't derive it from the locale
+  defp maybe_create_money(%{currency: false}, string, _options) do
     {:error,
      {Money.Invalid,
-      "A currency code can only be specified once. Found both #{inspect(cb)} and #{inspect(ca)}."}}
+      "A currency code, symbol or description must be specified but was not found in #{
+        inspect(string)
+      }"}}
   end
 
-  defp do_parse(_captures, string, _options) do
-    {:error, {Money.Invalid, "Could not parse #{inspect(string)}."}}
-  end
-
-  defp maybe_create_money(currency, amount, options) do
+  # No currency was in the string so we'll derive it from
+  # the locale
+  defp maybe_create_money(%{currency: nil} = money_map, string, options) do
     backend = Keyword.get_lazy(options, :backend, &Money.default_backend/0)
     locale = Keyword.get(options, :locale, backend.get_locale)
-    {currency_filter, options} = Keyword.pop(options, :currency_filter, :all)
-    {fuzzy, options} = Keyword.pop(options, :fuzzy, nil)
-    amount = String.trim(amount)
 
-    with {:ok, currency_strings} <-
-           Cldr.Currency.currency_strings(locale, backend, currency_filter),
-         {:ok, currency} <- find_currency(currency_strings, currency, fuzzy) do
+    with {:ok, backend} <- Cldr.validate_backend(backend),
+         {:ok, locale} <- Cldr.validate_locale(locale, backend) do
+      currency = Cldr.Currency.currency_from_locale(locale)
+
+      money_map
+      |> Map.put(:currency, currency)
+      |> maybe_create_money(string, options)
+    end
+  end
+
+  defp maybe_create_money(%{currency: currency, amount: amount}, _string, options) do
+    backend = Keyword.get_lazy(options, :backend, &Money.default_backend/0)
+    locale = Keyword.get(options, :locale, backend.get_locale)
+    currency = Kernel.to_string(currency)
+
+    {only_filter, options} =
+      Keyword.pop(options, :only, Keyword.get(options, :currency_filter, [:all]))
+
+    {except_filter, options} = Keyword.pop(options, :except, [])
+    {fuzzy, options} = Keyword.pop(options, :fuzzy, nil)
+
+    with {:ok, locale} <- backend.validate_locale(locale),
+         {:ok, currency_strings} <-
+           Cldr.Currency.currency_strings(locale, backend, only_filter, except_filter),
+         {:ok, currency} <-
+           find_currency(currency_strings, currency, fuzzy) do
       Money.new(currency, amount, options)
     end
   end
 
   defp find_currency(currency_strings, currency, nil) do
-    {:ok, Map.get(currency_strings, currency, currency)}
+    canonical_currency = String.downcase(currency)
+
+    case Map.get(currency_strings, canonical_currency) do
+      nil ->
+        {:error, unknown_currency_error(currency)}
+
+      currency ->
+        {:ok, currency}
+    end
   end
 
   defp find_currency(currency_strings, currency, fuzzy)
        when is_float(fuzzy) and fuzzy > 0.0 and fuzzy <= 1.0 do
+    canonical_currency = String.downcase(currency)
+
     {distance, currency_code} =
       currency_strings
-      |> Enum.map(fn {k, v} -> {String.jaro_distance(k, currency), v} end)
+      |> Enum.map(fn {k, v} -> {String.jaro_distance(k, canonical_currency), v} end)
       |> Enum.sort(fn {k1, _v1}, {k2, _v2} -> k1 > k2 end)
       |> hd
 
     if distance >= fuzzy do
       {:ok, currency_code}
     else
-      {:ok, currency}
+      {:error, unknown_currency_error(currency)}
     end
   end
 
@@ -574,6 +642,10 @@ defmodule Money do
        ArgumentError,
        "option :fuzzy must be a number > 0.0 and <= 1.0. Found #{inspect(fuzzy)}"
      }}
+  end
+
+  defp unknown_currency_error(currency) do
+    {Money.UnknownCurrencyError, "The currency #{inspect(currency)} is unknown or not supported"}
   end
 
   @doc """
@@ -615,6 +687,9 @@ defmodule Money do
       iex> Money.to_string Money.new(:THB, 1234)
       {:ok, "THB 1,234.00"}
 
+      iex> Money.to_string Money.new(:THB, 1234, fractional_digits: 4)
+      {:ok, "THB 1,234.0000"}
+
       iex> Money.to_string Money.new(:USD, 1234), format: :long
       {:ok, "1,234 US dollars"}
 
@@ -626,13 +701,26 @@ defmodule Money do
 
   def to_string(%Money{} = money, options) when is_list(options) do
     default_options = [backend: Money.default_backend(), currency: money.currency]
-    options = Keyword.merge(default_options, options)
+    format_options = Map.get(money, :format_options, [])
+
+    options =
+      default_options
+      |> Keyword.merge(format_options)
+      |> Keyword.merge(options)
+
     backend = options[:backend]
     Cldr.Number.to_string(money.amount, backend, options)
   end
 
   def to_string(%Money{} = money, %Cldr.Number.Format.Options{} = options) do
-    options = Map.put(options, :currency, money.currency)
+    format_options = Map.get(money, :format_options, [])
+
+    options =
+      format_options
+      |> Map.new()
+      |> Map.merge(options)
+      |> Map.put(:currency, money.currency)
+
     backend = Map.get(options, :backend, Money.default_backend())
     Cldr.Number.to_string(money.amount, backend, options)
   end
@@ -729,8 +817,8 @@ defmodule Money do
 
   """
   @spec abs(money :: Money.t()) :: Money.t()
-  def abs(%Money{currency: currency, amount: amount}) do
-    %Money{currency: currency, amount: Decimal.abs(amount)}
+  def abs(%Money{amount: amount} = money) do
+    %{money | amount: Decimal.abs(amount)}
   end
 
   @doc """
@@ -759,11 +847,12 @@ defmodule Money do
   """
   @spec add(money_1 :: Money.t(), money_2 :: Money.t()) ::
           {:ok, Money.t()} | {:error, {module(), String.t()}}
-  def add(%Money{currency: same_currency, amount: amount_a}, %Money{
-        currency: same_currency,
-        amount: amount_b
-      }) do
-    {:ok, %Money{currency: same_currency, amount: Decimal.add(amount_a, amount_b)}}
+
+  def add(
+        %Money{currency: same_currency, amount: amount_a},
+        %Money{currency: same_currency, amount: amount_b} = money_b
+      ) do
+    {:ok, %{money_b | amount: Decimal.add(amount_a, amount_b)}}
   end
 
   def add(%Money{currency: code_a}, %Money{currency: code_b}) do
@@ -830,11 +919,10 @@ defmodule Money do
   @spec sub(money_1 :: Money.t(), money_2 :: Money.t()) ::
           {:ok, Money.t()} | {:error, {module(), String.t()}}
 
-  def sub(%Money{currency: same_currency, amount: amount_a}, %Money{
-        currency: same_currency,
-        amount: amount_b
-      }) do
-    {:ok, %Money{currency: same_currency, amount: Decimal.sub(amount_a, amount_b)}}
+  def sub(%Money{currency: same_currency, amount: amount_a},
+          %Money{currency: same_currency, amount: amount_b} = money_b
+      ) do
+    {:ok, %{money_b | amount: Decimal.sub(amount_a, amount_b)}}
   end
 
   def sub(%Money{currency: code_a}, %Money{currency: code_b}) do
@@ -907,16 +995,17 @@ defmodule Money do
   """
   @spec mult(Money.t(), Cldr.Math.number_or_decimal()) ::
           {:ok, Money.t()} | {:error, {module(), String.t()}}
-  def mult(%Money{currency: code, amount: amount}, number) when is_integer(number) do
-    {:ok, %Money{currency: code, amount: Decimal.mult(amount, Decimal.new(number))}}
+
+  def mult(%Money{amount: amount} = money, number) when is_integer(number) do
+    {:ok, %{money | amount: Decimal.mult(amount, Decimal.new(number))}}
   end
 
-  def mult(%Money{currency: code, amount: amount}, number) when is_float(number) do
-    {:ok, %Money{currency: code, amount: Decimal.mult(amount, Decimal.from_float(number))}}
+  def mult(%Money{amount: amount} = money, number) when is_float(number) do
+    {:ok, %{money | amount: Decimal.mult(amount, Decimal.from_float(number))}}
   end
 
-  def mult(%Money{currency: code, amount: amount}, %Decimal{} = number) do
-    {:ok, %Money{currency: code, amount: Decimal.mult(amount, number)}}
+  def mult(%Money{amount: amount} = money, %Decimal{} = number) do
+    {:ok, %{money | amount: Decimal.mult(amount, number)}}
   end
 
   def mult(%Money{}, other) do
@@ -985,16 +1074,17 @@ defmodule Money do
   """
   @spec div(Money.t(), Cldr.Math.number_or_decimal()) ::
           {:ok, Money.t()} | {:error, {module(), String.t()}}
-  def div(%Money{currency: code, amount: amount}, number) when is_integer(number) do
-    {:ok, %Money{currency: code, amount: Decimal.div(amount, Decimal.new(number))}}
+
+  def div(%Money{amount: amount} = money, number) when is_integer(number) do
+    {:ok, %{money | amount: Decimal.div(amount, Decimal.new(number))}}
   end
 
-  def div(%Money{currency: code, amount: amount}, number) when is_float(number) do
-    {:ok, %Money{currency: code, amount: Decimal.div(amount, Decimal.from_float(number))}}
+  def div(%Money{amount: amount} = money, number) when is_float(number) do
+    {:ok, %{money | amount: Decimal.div(amount, Decimal.from_float(number))}}
   end
 
-  def div(%Money{currency: code, amount: amount}, %Decimal{} = number) do
-    {:ok, %Money{currency: code, amount: Decimal.div(amount, number)}}
+  def div(%Money{amount: amount} = money, %Decimal{} = number) do
+    {:ok, %{money | amount: Decimal.div(amount, number)}}
   end
 
   def div(%Money{}, other) do
@@ -1019,11 +1109,11 @@ defmodule Money do
 
   ## Examples
 
-      iex> Money.div Money.new(:USD, 200), 2
-      {:ok, Money.new(:USD, 100)}
+      iex> Money.div!(Money.new(:USD, 200), 2)
+      #Money<:USD, 100>
 
-      Money.div(Money.new(:USD, 200), "xx")
-      ** (ArgumentError) "Cannot divide money by \\"xx\\""]}}
+      iex> Money.div!(Money.new(:USD, 200), "xx")
+      ** (ArgumentError) Cannot divide money by "xx"
 
   """
   def div!(%Money{} = money, number) do
@@ -1047,10 +1137,10 @@ defmodule Money do
 
   ## Example
 
-      iex> Money.equal? Money.new(:USD, 200), Money.new(:USD, 200)
+      iex> Money.equal?(Money.new(:USD, 200), Money.new(:USD, 200))
       true
 
-      iex> Money.equal? Money.new(:USD, 200), Money.new(:USD, 100)
+      iex> Money.equal?(Money.new(:USD, 200), Money.new(:USD, 100))
       false
 
   """
@@ -1064,6 +1154,55 @@ defmodule Money do
 
   def equal?(_, _) do
     false
+  end
+
+  @doc """
+  Sum a list of monies that may be in different
+  currencies.
+
+  ## Arguments
+
+  * `money_list` is a list of any valid `Money.t` types returned
+    by `Money.new/2`
+
+  * `rates` is a map of exchange rates. The default is `%{}`.
+    `Money.ExchangeRates.latest_rates/0` can be used to return
+    the latest known exchange rates which can then applied as
+    the `rates` parameter.
+
+  ## Returns
+
+  * `{:ok, money}` representing the sum of the maybe
+    converted money amounts. The currency of the sum is
+    the currency of the first `Money` in the `money_list`.
+
+  * `{:error, {exception, reason}}` describing an error.
+
+  ## Examples
+
+      iex> Money.sum [Money.new(:USD, 100), Money.new(:USD, 200), Money.new(:USD, 50)]
+      {:ok, Money.new(:USD, 350)}
+
+      iex> Money.sum [Money.new(:USD, 100), Money.new(:USD, 200), Money.new(:AUD, 50)]
+      {:error,
+       {Money.ExchangeRateError, "No exchange rate is available for currency :AUD"}}
+
+      iex> rates = %{AUD: Decimal.new(2), USD: Decimal.new(1)}
+      iex> Money.sum [Money.new(:USD, 100), Money.new(:USD, 200), Money.new(:AUD, 50)], rates
+      {:ok, Money.from_float(:USD, 325.0)}
+
+  """
+  @doc since: "5.3.0"
+  @spec sum([t(), ...], ExchangeRates.t()) :: {:ok, t} | {:error, {module(), String.t()}}
+  def sum([%Money{} = first | rest] = money_list, rates \\ %{}) when is_list(money_list) do
+    %Money{currency: target_currency} = first
+
+    Enum.reduce_while(rest, {:ok, first}, fn money, {:ok, acc} ->
+      case to_currency(money, target_currency, rates) do
+        {:ok, increment} -> {:cont, Money.add(acc, increment)}
+        error -> {:halt, error}
+      end
+    end)
   end
 
   @doc """
@@ -1084,31 +1223,32 @@ defmodule Money do
 
   ## Examples
 
-      iex> Money.cmp Money.new(:USD, 200), Money.new(:USD, 100)
+      iex> Money.compare Money.new(:USD, 200), Money.new(:USD, 100)
       :gt
 
-      iex> Money.cmp Money.new(:USD, 200), Money.new(:USD, 200)
+      iex> Money.compare Money.new(:USD, 200), Money.new(:USD, 200)
       :eq
 
-      iex> Money.cmp Money.new(:USD, 200), Money.new(:USD, 500)
+      iex> Money.compare Money.new(:USD, 200), Money.new(:USD, 500)
       :lt
 
-      iex> Money.cmp Money.new(:USD, 200), Money.new(:CAD, 500)
+      iex> Money.compare Money.new(:USD, 200), Money.new(:CAD, 500)
       {:error,
        {ArgumentError,
         "Cannot compare monies with different currencies. Received :USD and :CAD."}}
 
   """
-  @spec cmp(money_1 :: Money.t(), money_2 :: Money.t()) ::
+  @spec compare(money_1 :: Money.t(), money_2 :: Money.t()) ::
           :gt | :eq | :lt | {:error, {module(), String.t()}}
-  def cmp(%Money{currency: same_currency, amount: amount_a}, %Money{
+
+  def compare(%Money{currency: same_currency, amount: amount_a}, %Money{
         currency: same_currency,
         amount: amount_b
       }) do
-    Decimal.cmp(amount_a, amount_b)
+    Cldr.Decimal.compare(amount_a, amount_b)
   end
 
-  def cmp(%Money{currency: code_a}, %Money{currency: code_b}) do
+  def compare(%Money{currency: code_a}, %Money{currency: code_b}) do
     {:error,
      {ArgumentError,
       "Cannot compare monies with different currencies. " <>
@@ -1131,12 +1271,12 @@ defmodule Money do
 
   ## Examples
 
-      Money.cmp! Money.new(:USD, 200), Money.new(:CAD, 500)
+      Money.compare! Money.new(:USD, 200), Money.new(:CAD, 500)
       ** (ArgumentError) Cannot compare monies with different currencies. Received :USD and :CAD.
 
   """
-  def cmp!(%Money{} = money_1, %Money{} = money_2) do
-    case cmp(money_1, money_2) do
+  def compare!(%Money{} = money_1, %Money{} = money_2) do
+    case compare(money_1, money_2) do
       {:error, {exception, reason}} -> raise exception, reason
       result -> result
     end
@@ -1160,33 +1300,32 @@ defmodule Money do
 
   ## Examples
 
-      iex> Money.compare Money.new(:USD, 200), Money.new(:USD, 100)
+      iex> Money.cmp Money.new(:USD, 200), Money.new(:USD, 100)
       1
 
-      iex> Money.compare Money.new(:USD, 200), Money.new(:USD, 200)
+      iex> Money.cmp Money.new(:USD, 200), Money.new(:USD, 200)
       0
 
-      iex> Money.compare Money.new(:USD, 200), Money.new(:USD, 500)
+      iex> Money.cmp Money.new(:USD, 200), Money.new(:USD, 500)
       -1
 
-      iex> Money.compare Money.new(:USD, 200), Money.new(:CAD, 500)
+      iex> Money.cmp Money.new(:USD, 200), Money.new(:CAD, 500)
       {:error,
        {ArgumentError,
         "Cannot compare monies with different currencies. Received :USD and :CAD."}}
 
   """
-  @spec compare(money_1 :: Money.t(), money_2 :: Money.t()) ::
+  @spec cmp(money_1 :: Money.t(), money_2 :: Money.t()) ::
           -1 | 0 | 1 | {:error, {module(), String.t()}}
-  def compare(%Money{currency: same_currency, amount: amount_a}, %Money{
-        currency: same_currency,
-        amount: amount_b
-      }) do
-    amount_a
-    |> Decimal.compare(amount_b)
-    |> Decimal.to_integer()
+  def cmp(%Money{currency: same_currency} = money_1, %Money{currency: same_currency} = money_2) do
+    case compare(money_1, money_2) do
+      :lt -> -1
+      :eq -> 0
+      :gt -> 1
+    end
   end
 
-  def compare(%Money{currency: code_a}, %Money{currency: code_b}) do
+  def cmp(%Money{currency: code_a}, %Money{currency: code_b}) do
     {:error,
      {ArgumentError,
       "Cannot compare monies with different currencies. " <>
@@ -1209,12 +1348,12 @@ defmodule Money do
 
   ## Examples
 
-      Money.compare! Money.new(:USD, 200), Money.new(:CAD, 500)
+      Money.cmp! Money.new(:USD, 200), Money.new(:CAD, 500)
       ** (ArgumentError) Cannot compare monies with different currencies. Received :USD and :CAD.
 
   """
-  def compare!(%Money{} = money_1, %Money{} = money_2) do
-    case compare(money_1, money_2) do
+  def cmp!(%Money{} = money_1, %Money{} = money_2) do
+    case cmp(money_1, money_2) do
       {:error, {exception, reason}} -> raise exception, reason
       result -> result
     end
@@ -1430,22 +1569,23 @@ defmodule Money do
   @one Decimal.new(1)
   @zero Decimal.new(0)
 
-  def put_fraction(%Money{currency: code, amount: amount}, upto) when is_integer(upto) do
-    with {:ok, currency} <- Currency.currency_for_code(code) do
+  def put_fraction(%Money{amount: amount} = money, upto) when is_integer(upto) do
+    with {:ok, currency} <- Currency.currency_for_code(money.currency) do
       digits = currency.digits
       diff = Decimal.from_float((100 - upto) * :math.pow(10, -digits))
 
-      if Decimal.cmp(diff, @one) in [:lt, :eq] && Decimal.cmp(@zero, diff) in [:lt, :eq] do
+      if Cldr.Decimal.compare(diff, @one) in [:lt, :eq] &&
+           Cldr.Decimal.compare(@zero, diff) in [:lt, :eq] do
         new_amount =
           Decimal.round(amount, 0)
           |> Decimal.add(@one)
           |> Decimal.sub(diff)
 
-        Money.new(code, new_amount)
+        %{money | amount: new_amount}
       else
         {:error,
          {Money.InvalidAmountError,
-          "Rounding up to #{inspect(upto)} is invalid for currency #{inspect(code)}"}}
+          "Rounding up to #{inspect(upto)} is invalid for currency #{inspect(money.currency)}"}}
       end
     end
   end
@@ -1463,19 +1603,31 @@ defmodule Money do
     atom or string and the value is a Decimal conversion factor.  The default is the
     latest available exchange rates returned from `Money.ExchangeRates.latest_rates()`
 
+  ## Converting to a currency defined in a locale
+
+  To convert a `Money` to a currency defined by a locale,
+  `Cldr.Currency.currency_from_locale/1` can be called with
+  a `t:Cldr.LanguageTag.t()` parameter. It will return
+  the currency configured for that locale.
+
   ## Examples
 
-      Money.to_currency(Money.new(:USD, 100), :AUD, %{USD: Decimal.new(1), AUD: Decimal.from_float(0.7345)})
-      {:ok, #Money<:AUD, 73.4500>}
+      iex> Money.to_currency(Money.new(:USD, 100), :AUD,
+      ...>   %{USD: Decimal.new(1), AUD: Decimal.from_float(0.7345)})
+      {:ok, Money.new(:AUD, "73.4500")}
 
-      Money.to_currency(Money.new("USD", 100), "AUD", %{"USD" => Decimal.new(1), "AUD" => Decimal.from_float(0.7345)})
-      {:ok, #Money<:AUD, 73.4500>}
+      iex> Money.to_currency(Money.new("USD", 100), "AUD",
+      ...>   %{"USD" => Decimal.new(1), "AUD" => Decimal.from_float(0.7345)})
+      {:ok, Money.new(:AUD, "73.4500")}
 
-      iex> Money.to_currency Money.new(:USD, 100), :AUDD, %{USD: Decimal.new(1), AUD: Decimal.from_float(0.7345)}
+      iex> Money.to_currency(Money.new(:USD, 100), :AUDD,
+      ...>   %{USD: Decimal.new(1), AUD: Decimal.from_float(0.7345)})
       {:error, {Cldr.UnknownCurrencyError, "The currency :AUDD is invalid"}}
 
-      iex> Money.to_currency Money.new(:USD, 100), :CHF, %{USD: Decimal.new(1), AUD: Decimal.from_float(0.7345)}
-      {:error, {Money.ExchangeRateError, "No exchange rate is available for currency :CHF"}}
+      iex> Money.to_currency(Money.new(:USD, 100), :CHF,
+      ...>   %{USD: Decimal.new(1), AUD: Decimal.from_float(0.7345)})
+      {:error, {Money.ExchangeRateError,
+        "No exchange rate is available for currency :CHF"}}
 
   """
   @spec to_currency(
@@ -1505,12 +1657,12 @@ defmodule Money do
     end
   end
 
-  def to_currency(%Money{currency: from_currency, amount: amount}, to_currency, %{} = rates)
-      when is_atom(to_currency) do
+  def to_currency(%Money{currency: from_currency, amount: amount} =  money, to_currency, rates)
+      when is_atom(to_currency) and is_map(rates) do
     with {:ok, to_currency_code} <- validate_currency(to_currency),
          {:ok, cross_rate} <- cross_rate(from_currency, to_currency_code, rates) do
       converted_amount = Decimal.mult(amount, cross_rate)
-      {:ok, Money.new(to_currency, converted_amount)}
+      {:ok, %{money | currency: to_currency, amount: converted_amount}}
     end
   end
 
@@ -1519,7 +1671,7 @@ defmodule Money do
 
   ## Arguments
 
-  * `money` is any `Money.t` struct returned by `Cldr.Currency.new/2`
+  * `money` is any `t:Money.t()` struct returned by `Cldr.Currency.new/2`
 
   * `to_currency` is a valid currency code into which the `money` is converted
 
@@ -1529,13 +1681,16 @@ defmodule Money do
 
   ## Examples
 
-      iex> Money.to_currency! Money.new(:USD, 100), :AUD, %{USD: Decimal.new(1), AUD: Decimal.from_float(0.7345)}
+      iex> Money.to_currency! Money.new(:USD, 100), :AUD,
+      ...>   %{USD: Decimal.new(1), AUD: Decimal.from_float(0.7345)}
       #Money<:AUD, 73.4500>
 
-      iex> Money.to_currency! Money.new("USD", 100), "AUD", %{"USD" => Decimal.new(1), "AUD" => Decimal.from_float(0.7345)}
+      iex> Money.to_currency! Money.new("USD", 100), "AUD",
+      ...>   %{"USD" => Decimal.new(1), "AUD" => Decimal.from_float(0.7345)}
       #Money<:AUD, 73.4500>
 
-      Money.to_currency! Money.new(:USD, 100), :ZZZ, %{USD: Decimal.new(1), AUD: Decimal.from_float(0.7345)}
+      => Money.to_currency! Money.new(:USD, 100), :ZZZ,
+           %{USD: Decimal.new(1), AUD: Decimal.from_float(0.7345)}
       ** (Cldr.UnknownCurrencyError) Currency :ZZZ is not known
 
   """
@@ -1548,17 +1703,10 @@ defmodule Money do
   def to_currency!(money, to_currency, rates \\ Money.ExchangeRates.latest_rates())
 
   def to_currency!(%Money{} = money, currency, rates) do
-    money
-    |> to_currency(currency, rates)
-    |> do_to_currency!
-  end
-
-  defp do_to_currency!({:ok, converted}) do
-    converted
-  end
-
-  defp do_to_currency!({:error, {exception, reason}}) do
-    raise exception, reason
+    case to_currency(money, currency, rates) do
+      {:ok, money} -> money
+      {:error, {exception, reason}} -> raise exception, reason
+    end
   end
 
   @doc """
@@ -1659,9 +1807,10 @@ defmodule Money do
   end
 
   @doc """
-  Calls `Decimal.reduce/1` on the given `Money.t()`
+  Normalizes the underlying decimal amount in a
+  given `Money.t()`
 
-  This will reduce the coefficient and exponent of the
+  This will normalize the coefficient and exponent of the
   decimal amount in a standard way that may aid in
   native comparison of `%Money.t()` items.
 
@@ -1673,15 +1822,28 @@ defmodule Money do
       #Money<:USD, 42.00000000>
       iex> x == y
       false
-      iex> y = Money.reduce(x)
+      iex> y = Money.normalize(x)
       #Money<:USD, 42>
       iex> x == y
       true
 
   """
-  @spec reduce(Money.t()) :: Money.t()
-  def reduce(%Money{currency: currency, amount: amount}) do
-    %Money{currency: currency, amount: Decimal.reduce(amount)}
+  @spec normalize(Money.t()) :: Money.t()
+  Cldr.Macros.doc_since("5.0.0")
+
+  if Code.ensure_loaded?(Decimal) and function_exported?(Decimal, :normalize, 1) do
+    def normalize(%Money{amount: amount} = money) do
+      %{money | amount: Decimal.normalize(amount)}
+    end
+  else
+    def normalize(%Money{amount: amount} = money) do
+      %{money | amount: Decimal.reduce(amount)}
+    end
+  end
+
+  @deprecated "Use Money.normalize/1 instead."
+  def reduce(money) do
+    normalize(money)
   end
 
   @doc """
@@ -1723,7 +1885,7 @@ defmodule Money do
     new_money =
       money
       |> Money.round(opts)
-      |> Money.reduce()
+      |> Money.normalize()
 
     {:ok, remainder} = Money.sub(money, new_money)
     {:ok, currency} = Currency.currency_for_code(money.currency)
@@ -1751,9 +1913,11 @@ defmodule Money do
   * `currency` is the currency code for the `integer`.  The assumed
     decimal places is derived from the currency code.
 
+  * `options` is a keyword list of options passed to `Money.new/3`
+
   ## Returns
 
-  * A `Money` struct or
+  * A `t:Money` struct or
 
   * `{:error, {Cldr.UnknownCurrencyError, message}}`
 
@@ -1772,8 +1936,10 @@ defmodule Money do
       #Money<:COP, 200.12>
 
   """
-  @spec from_integer(integer, currency_code) :: Money.t() | {:error, module(), String.t()}
-  def from_integer(amount, currency) when is_integer(amount) do
+  @spec from_integer(integer, currency_code, Keyword.t()) ::
+    Money.t() | {:error, module(), String.t()}
+
+  def from_integer(amount, currency, options \\ []) when is_integer(amount) do
     with {:ok, currency} <- validate_currency(currency),
          {:ok, %{iso_digits: digits}} <- Currency.currency_for_code(currency) do
       sign = if amount < 0, do: -1, else: 1
@@ -1781,12 +1947,20 @@ defmodule Money do
 
       sign
       |> Decimal.new(Kernel.abs(amount), digits)
-      |> Money.new(currency)
+      |> Money.new(currency, options)
     end
   end
 
   @doc """
-  Return a zero amount `Money.t` in the given currency
+  Return a zero amount `t:Money` in the given currency.
+
+  ## Arguments
+
+  * `money_or_currency` is either a `t:Money` or
+    a currency code
+
+  * `options` is a keyword list of options passed
+    to `Money.new/3`. The default is `[]`.
 
   ## Example
 
@@ -1802,13 +1976,16 @@ defmodule Money do
 
   """
   @spec zero(currency_code | Money.t()) :: Money.t()
-  def zero(%{currency: currency, amount: _amount}) do
-    zero(currency)
+
+  def zero(money_or_currency, options \\ [])
+
+  def zero(%Money{currency: currency}, options) do
+    zero(currency, options)
   end
 
-  def zero(currency) do
+  def zero(currency, options) do
     with {:ok, currency} <- validate_currency(currency) do
-      Money.new(currency, 0)
+      Money.new(currency, 0, options)
     end
   end
 
@@ -1937,9 +2114,9 @@ defmodule Money do
     Application.get_env(@app_name, :default_cldr_backend) || cldr_default_backend ||
       raise """
         A default backend must be configured in config.exs as either:
-          config ex_cldr, default_backend: MyApp.Cldr
+          config :ex_cldr, default_backend: MyApp.Cldr
         or
-          config ex_money, default_cldr_backend: MyApp.Cldr
+          config :ex_money, default_cldr_backend: MyApp.Cldr
       """
   end
 end

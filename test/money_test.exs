@@ -286,41 +286,41 @@ defmodule MoneyTest do
   test "Split %Money{} into 4 equal parts" do
     m1 = Money.new(:USD, 100)
     {m2, m3} = Money.split(m1, 4)
-    assert Money.cmp(m2, Money.new(:USD, 25)) == :eq
-    assert Money.cmp(m3, Money.new(:USD, 0)) == :eq
+    assert Money.compare(m2, Money.new(:USD, 25)) == :eq
+    assert Money.compare(m3, Money.new(:USD, 0)) == :eq
   end
 
   test "Split %Money{} into 3 equal parts" do
     m1 = Money.new(:USD, 100)
     {m2, m3} = Money.split(m1, 3)
-    assert Money.cmp(m2, Money.new(:USD, Decimal.new("33.33"))) == :eq
-    assert Money.cmp(m3, Money.new(:USD, Decimal.new("0.01"))) == :eq
+    assert Money.compare(m2, Money.new(:USD, Decimal.new("33.33"))) == :eq
+    assert Money.compare(m3, Money.new(:USD, Decimal.new("0.01"))) == :eq
   end
 
   property "check that money split sums to the original value" do
-    check all {money, splits} <- GenerateSplits.generate_money(), max_runs: 1_000 do
+    check all({money, splits} <- GenerateSplits.generate_money(), max_runs: 1_000) do
       {split_amount, remainder} = Money.split(money, splits)
       reassemble = Money.mult!(split_amount, splits) |> Money.add!(remainder)
-      assert Money.cmp(reassemble, money) == :eq
+      assert Money.compare(reassemble, money) == :eq
     end
   end
 
-  test "Test successful money cmp" do
+  test "Test successful money compare" do
     m1 = Money.new(:USD, 100)
     m2 = Money.new(:USD, 200)
     m3 = Money.new(:USD, 100)
-    assert Money.cmp(m1, m2) == :lt
-    assert Money.cmp(m2, m1) == :gt
-    assert Money.cmp(m1, m3) == :eq
+    assert Money.compare(m1, m2) == :lt
+    assert Money.compare(m2, m1) == :gt
+    assert Money.compare(m1, m3) == :eq
   end
 
-  test "Test money cmp!" do
+  test "Test money compare!" do
     m1 = Money.new(:USD, 100)
     m2 = Money.new(:USD, 200)
     m3 = Money.new(:USD, 100)
-    assert Money.cmp!(m1, m2) == :lt
-    assert Money.cmp!(m2, m1) == :gt
-    assert Money.cmp!(m1, m3) == :eq
+    assert Money.compare!(m1, m2) == :lt
+    assert Money.compare!(m2, m1) == :gt
+    assert Money.compare!(m1, m3) == :eq
   end
 
   test "cmp! raises an exception" do
@@ -329,22 +329,22 @@ defmodule MoneyTest do
     end
   end
 
-  test "Test successul money compare" do
+  test "Test successul money cmp" do
     m1 = Money.new(:USD, 100)
     m2 = Money.new(:USD, 200)
     m3 = Money.new(:USD, 100)
-    assert Money.compare(m1, m2) == -1
-    assert Money.compare(m2, m1) == 1
-    assert Money.compare(m1, m3) == 0
+    assert Money.cmp(m1, m2) == -1
+    assert Money.cmp(m2, m1) == 1
+    assert Money.cmp(m1, m3) == 0
   end
 
-  test "Test money compare!" do
+  test "Test money cmp!" do
     m1 = Money.new(:USD, 100)
     m2 = Money.new(:USD, 200)
     m3 = Money.new(:USD, 100)
-    assert Money.compare!(m1, m2) == -1
-    assert Money.compare!(m2, m1) == 1
-    assert Money.compare!(m1, m3) == 0
+    assert Money.cmp!(m1, m2) == -1
+    assert Money.cmp!(m2, m1) == 1
+    assert Money.cmp!(m1, m3) == 0
   end
 
   test "compare! raises an exception" do
@@ -513,7 +513,7 @@ defmodule MoneyTest do
     Application.put_env(:ex_money, :default_cldr_backend, nil)
 
     assert_raise Cldr.NoDefaultBackendError, fn ->
-      Cldr.default_backend()
+      Cldr.default_backend!()
     end
 
     Application.put_env(:ex_money, :default_cldr_backend, backend)
@@ -529,5 +529,22 @@ defmodule MoneyTest do
 
     Application.put_env(:ex_money, :default_cldr_backend, money_backend)
     Application.put_env(:ex_cldr, :default_backend, cldr_backend)
+  end
+
+  test "that format options propogate through operations" do
+    format_options = [fractional_digits: 4]
+    money = Money.new!(:USD, 100)
+    money_with_options = Money.new!(:USD, 100, format_options)
+
+    assert Money.add!(money, money_with_options).format_options == format_options
+    assert Money.sub!(money, money_with_options).format_options == format_options
+    assert Money.mult!(money_with_options, 3).format_options == format_options
+    assert Money.div!(money_with_options, 3).format_options == format_options
+
+  end
+
+  test "to_string/2 on a Money that doesn't have a :format_options key" do
+    money = %{__struct__: Money, amount: Decimal.new(3), currency: :USD}
+    assert Money.to_string(money) == {:ok, "$3.00"}
   end
 end

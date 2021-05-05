@@ -5,12 +5,18 @@ defmodule Money.Application do
 
   @auto_start :auto_start_exchange_rate_service
 
-  def start(_type, _args) do
-    import Supervisor.Spec, warn: false
+  def start(_type, args) do
+    children = [
+      Money.ExchangeRates.Supervisor
+    ]
 
-    children = [supervisor(Money.ExchangeRates.Supervisor, [])]
+    opts =
+      if args == [] do
+        [strategy: :one_for_one, name: Money.Supervisor]
+      else
+        args
+      end
 
-    opts = [strategy: :one_for_one, name: Money.Supervisor]
     supervisor = Supervisor.start_link(children, opts)
 
     if start_exchange_rate_service?() do

@@ -4,10 +4,9 @@
 [![License](https://img.shields.io/badge/license-Apache%202-blue.svg)](https://github.com/kipcole9/money/blob/master/LICENSE)
 
 Money implements a set of functions to store, retrieve, convert and perform arithmetic
-on a `%Money{}` type that is composed of an ISO 4217 currency code and a currency amount.
+on a `%Money{}` type that is composed of an [ISO 4217](https://www.iso.org/iso-4217-currency-codes.html) currency code and a currency amount.
 
-Money is opinionated in the interests of serving as a dependable library
-that can underpin accounting and financial applications.
+Money is opinionated in the interests of serving as a dependable library that can underpin accounting and financial applications.
 
 How is this opinion expressed?
 
@@ -36,6 +35,48 @@ How is this opinion expressed?
 
 * `Money` is supported on Elixir 1.6 and later only
 
+## Supervisor configuration and operation
+
+`Money` starts a supervisor `Money.Supervisor` by default unless the dependency is configured as `runtime: false` in `mix.exs`. If configured as `runtime: false` then the application can be started later via `Money.Application.start(:normal, supervisor_options)` where `supervisor_options` is a keyword list of options that is given the `Supervisor.start_link/2`. The default options are `[strategy: :one_for_one, name: Money.Supervisor]`.
+
+The application supervisor is used by default to start the exchange rates service when required. The exchange rate service can be configured to run in a user defined supervision tree as explained in the next section.
+
+## Private Use Currencies
+
+As of [ex_cldr_currencies version 2.6.0](https://hex.pm/packages/ex_cldr_currencies/2.6.0) it is possible to define private use currencies. These are currencies that are [ISO 4217](https://www.iso.org/iso-4217-currency-codes.html) compliant but guaranteed never to be allocated by the ISO committee and therefore safe to be used by developers.
+
+### Defining private use currencies
+
+See [Cldr.Currency.new/2](https://hexdocs.pm/ex_cldr_currencies/Cldr.Currency.html#new/2)
+
+### Starting the private use currency store
+
+In order to define private use currencies, a special `:ets` table is required to hold their definitions. The is implemented by a supervisor and two workers that together aim to preserve the availability of the `:ets` table as resiliently as possible. The implementation is an embedded and updated version of [eternal](https://hex.pm/packages/eternal).
+
+The basic requirement is to add a the private use currency supervisor to your applications supervision tree. For example:
+```elixir
+defmodule MyApp do
+  use Application
+
+  def start(_type, _args) do
+
+    # Start the service which maintains the
+    # :ets table that holds the private use currencies
+    children = [
+      Cldr.Currency
+      ...
+    ]
+
+    opts = [strategy: :one_for_one, name: MoneyTest.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+end
+```
+It is also possible to define a callback that is called when the `Cldr.Currency` supervisor is started so that private use currencies can be defined. For further information see [Defining Private Use Currencies](https://hexdocs.pm/ex_cldr_currencies/readme.html#defining-private-use-currencies).
+
+### Updating to ex_cldr_currencies verison 2.6.0
+Executing `mix deps.update ex_cldr_currencies` is all that should be required.
+
 ## Exchange rates and currency conversion
 
 Money includes a process to retrieve exchange rates on a periodic basis.  These exchange rates can then be used to support currency conversion.  This service is not started by default.  If started it will attempt to retrieve exchange rates every 5 minutes by default.
@@ -58,7 +99,7 @@ An optional callback module can also be defined.  This module defines a `rates_r
       log_failure: :warn,
       log_info: :info,
       log_success: nil,
-      json_library: Cldr.Config.json_library(),
+      json_library: Jason,
       default_cldr_backend: MyApp.Cldr
 
 ### Configuration key definitions
@@ -134,8 +175,7 @@ Some examples of configuring the `:preload_exchange_rates` key follow:
 
 ### Open Exchange Rates configuration
 
-If you plan to use the provided Open Exchange Rates module to retrieve exchange rates then you should also provide the addition
-  configuration key for `app_id`:
+If you plan to use the provided Open Exchange Rates module to retrieve exchange rates then you should also provide the addition configuration key for `app_id`:
 
       config :ex_money,
         open_exchange_rates_app_id: "your_app_id"
@@ -145,8 +185,7 @@ If you plan to use the provided Open Exchange Rates module to retrieve exchange 
       config :ex_money,
         open_exchange_rates_app_id: {:system, "OPEN_EXCHANGE_RATES_APP_ID"}
 
-  The default exchange rate retrieval module is provided in `Money.ExchangeRates.OpenExchangeRates` which can be used
-  as a example to implement your own retrieval module for  other services.
+The default exchange rate retrieval module is provided in `Money.ExchangeRates.OpenExchangeRates` which can be used as a example to implement your own retrieval module for  other services.
 
 ### Managing the configuration at runtime
 
@@ -282,6 +321,21 @@ Note that the amount and currency code arguments to `Money.new/3` can be supplie
   iex> Money.parse "australian dollar 12346.45", locale: "en"
   #Money<:AUD, 12346.45>
 
+  # Parse using a default currency
+  iex> Money.parse("100", default_currency: :EUR)
+  #Money<:EUR, 100>
+
+  # Parse using the default currency of the locale
+	# If no `:locale` option is provided then
+	# the locale associated with `Money.default_backend/0`
+	# is used.
+  iex> Money.parse("100", locale: "en")
+  #Money<:EUR, 100>
+
+  # Parse with a default currency for the current locale
+  iex> Money.parse("100", default_currency: Money.default_currency_for_locale())
+  #Money<:USD, 100>
+
   # Note that the decimal separator in the "de" locale
   # is a `.`
   iex> Money.parse "AU$ 12346,45", locale: "de"
@@ -302,15 +356,24 @@ Note that the amount and currency code arguments to `Money.new/3` can be supplie
    {Money.Invalid, "Unable to create money from \"eurosports\" and \"100\""}}
 
   # Eligible currencies can be filtered
-  iex> Money.parse("100 eurosports", fuzzy: 0.8, currency_filter: [:current, :tender])
+  iex> Money.parse("100 eurosports", fuzzy: 0.8, only: [:current])
   #Money<:EUR, 100>
 
-  iex> Money.parse "100 afghan afghanis"
-  #Money<:AFA, 100>
+  iex> Money.parse("100 euro", only: [:EUR, :USD, :COP])
+  #Money<:EUR, 100>
 
-  iex> Money.parse "100 afghan afghanis", currency_filter: [:current, :tender]
+  iex> Money.parse("100 euro", except: [:EUR, :USD, :COP])
   {:error,
-   {Money.Invalid, "Unable to create money from \"afghan afghanis\" and \"100\""}}
+    {Money.UnknownCurrencyError,
+      "The currency \"euro\" is unknown or not supported"}}
+
+  iex> Money.parse "100 afghan afghanis"
+  #Money<:AFN, 100>
+
+  iex> Money.parse "100 afa", only: [:current]
+  {:error,
+   {Money.UnknownCurrencyError,
+    "The currency \"afa\" is unknown or not supported"}}
 ```
 
 ### Casting a money type (basic support for HTML forms)
@@ -331,6 +394,33 @@ Therefore an error is returned if an attempt is made to use `Money.new/2` with a
         "and precision issues.  If absolutely required, use Money.from_float/2"}}
 
 If the use of `float`s is require then the function `Money.from_float/2` is provided with the same arguments as those for `Money.new/2`.  `Money.from_float/2` provides an addition check and will return an error if the precision (number of digits) of the provided float is more than 15 (the number of digits guaranteed to round-trip between a 64-bit float and a string).
+
+### Comparison functions
+
+`Money` values can be compared as long as they have the same currency. The recommended function is `Money.compare/2` which, given two compatible money amounts, will return `:lt`, `:eq` or `:gt` depending on the relationship. For example:
+```
+iex> Money.compare Money.new(:USD, 100), Money.new(:USD, 200)
+:lt
+
+iex> Money.compare Money.new(:USD, 100), Money.new(:AUD, 200)
+{:error,
+ {ArgumentError,
+  "Cannot compare monies with different currencies. Received :USD and :AUD."}}
+```
+
+From Elixir verison `1.10.0` onwards, several functions in the `Enum` module can use the `Money.compare/2` function to simplify sorting. For example:
+```
+iex> list = [Money.new(:USD, 100), Money.new(:USD, 200)]
+[#Money<:USD, 100>, #Money<:USD, 200>]
+iex> Enum.sort list, Money
+[#Money<:USD, 100>, #Money<:USD, 200>]
+iex> Enum.sort list, {:asc, Money}
+[#Money<:USD, 100>, #Money<:USD, 200>]
+iex> Enum.sort list, {:desc, Money}
+[#Money<:USD, 200>, #Money<:USD, 100>]
+```
+
+**Note that `Enum.sort/2` will sort money amounts even when the currencies are incompatible. In this case the order of the result is not predictable. It is the developers responsibility to filter the list to compatible currencies prior to sorting. This is a limitation of the `Enum.sort/2` implementation.**
 
 ### Optional ~M sigil
 
@@ -376,7 +466,7 @@ The main API for formatting `Money` is `Money.to_string/2`. Additionally formatt
     iex> Money.to_string Money.new("EUR", "234.467"), locale: "fr"
     {:ok, "234,47 €"}
 
-**Note that the output is influenced by the locale in effect.**  By default the locale used is that returned by `Cldr.get_current_local/0`.  Its default value is "en-001".  Additional locales can be configured, see `Cldr`.  The formatting options are defined in `Cldr.Number.to_string/2`.
+**Note that the output is influenced by the locale in effect.**  By default the locale used is that returned by `Cldr.get_locale/0`.  Its default value is `:en-001`.  Additional locales can be configured, see `Cldr`.  The formatting options are defined in `Cldr.Number.to_string/2`.
 
 ### Arithmetic Functions
 
@@ -614,7 +704,7 @@ The primary functions supporting subscriptions are:
 
 ## Serializing to a database with Ecto
 
-The companion package [ex_money_sql](https://hex.pm/packages/ex_money_sql) provides functions for the serialization of `Money` data.  See the [README]() for further information.
+The companion package [ex_money_sql](https://hex.pm/packages/ex_money_sql) provides functions for the serialization of `Money` data.  See the [README](https://hexdocs.pm/ex_money_sql/readme.html) for further information.
 
 ## Installation
 
@@ -623,7 +713,7 @@ The companion package [ex_money_sql](https://hex.pm/packages/ex_money_sql) provi
 ```elixir
 def deps do
   [
-    {:ex_money, "~> 4.0"},
+    {:ex_money, "~> 5.0"},
     ...
   ]
 end
